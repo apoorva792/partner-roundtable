@@ -248,6 +248,8 @@ footer{background:var(--espresso); padding:48px 0; border-top:1px solid rgba(212
 
 .modal-submit{width:100%; justify-content:center; margin-top:8px;}
 .modal-submit:disabled{opacity:.6; cursor:default;}
+.submit-error{display:none; font-size:.8rem; color:#d98a7a; margin-top:14px; text-align:center; line-height:1.5;}
+.submit-error.show{display:block;}
 
 .rsvp-footnote{font-size:.75rem; color:var(--text-low); margin-top:20px; text-align:center; line-height:1.5;}
 
@@ -402,6 +404,7 @@ footer{background:var(--espresso); padding:48px 0; border-top:1px solid rgba(212
           <div class="err-msg">Please enter a valid email address.</div>
         </div>
         <button type="submit" class="btn btn-primary modal-submit" id="submitBtn">Confirm RSVP</button>
+        <p class="submit-error" id="submitError">Something went wrong on our end. Please try again, or email us and we&rsquo;ll add you manually.</p>
       </form>
       <p class="rsvp-footnote">By registering you'll receive a calendar invite with the Google Meet link and dial-in details.</p>
     </div>
@@ -455,6 +458,9 @@ var emailInput = document.getElementById('email');
 var nameField = document.getElementById('nameField');
 var emailField = document.getElementById('emailField');
 var submitBtn = document.getElementById('submitBtn');
+var submitError = document.getElementById('submitError');
+var confirmSub = document.querySelector('#confirmState .sub');
+var confirmSubDefault = confirmSub.textContent;
 
 function openModal(){
   overlay.classList.add('open');
@@ -464,6 +470,8 @@ function openModal(){
   form.reset();
   nameField.classList.remove('error');
   emailField.classList.remove('error');
+  submitError.classList.remove('show');
+  confirmSub.textContent = confirmSubDefault;
 }
 function closeModal(){
   overlay.classList.remove('open');
@@ -492,27 +500,48 @@ form.addEventListener('submit', function(e){
   var record = { name: nameInput.value.trim(), email: emailInput.value.trim(), rsvpAt: new Date().toISOString() };
   var key = 'rsvp:' + record.email.toLowerCase();
 
-  var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzfvG6WFWd9VmJcrHms8bp86rNYXeRVJWLH8fSrxPCiWT09XYhpJrCDMqhvy-ECwFQj/exec';
+  var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyy8RGumaxQFy3xHENzOCeVLZyNSaKVdvpmeUx5w76qHUCY_sMvNAivBkVCt0MzGOPF/exec';
+
+  submitError.classList.remove('show');
 
   var savePromise = (window.storage && window.storage.set)
     ? window.storage.set(key, JSON.stringify(record), true).catch(function(){ return null; })
     : Promise.resolve(null);
 
-  // Fire-and-forget: logs the RSVP to the Sheet and adds the guest to the Calendar event.
-  // Apps Script web apps don't return readable CORS responses from the browser,
-  // so we can't confirm success here client-side — check the Sheet to verify.
+  // Apps Script /exec returns Access-Control-Allow-Origin:* on both the 302 and
+  // the final response, so a simple-request POST (text/plain, no preflight) is
+  // readable here. That lets us tell a real failure from a silent one.
   var scriptPromise = fetch(APPS_SCRIPT_URL, {
     method: 'POST',
-    mode: 'no-cors',
+    mode: 'cors',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ name: record.name, email: record.email })
-  }).catch(function(){ return null; });
+  }).then(function(r){ return r.json(); });
 
-  Promise.all([savePromise, scriptPromise]).finally(function(){
+  Promise.all([savePromise, scriptPromise]).then(function(results){
+    var res = results[1] || {};
+
+    // The Sheet write is what makes an RSVP real; it happens before the
+    // calendar step, so success:false means nothing was recorded at all.
+    if (!res.success) {
+      throw new Error(res.error || 'RSVP was not recorded');
+    }
+
+    var invited = res.calendar === 'invited' || res.calendar === 'already_invited';
+    if (!invited) {
+      // Registered, but the invite didn't go out (event missing, Calendar
+      // service off, quota). Don't promise an email we can't see leaving.
+      console.warn('RSVP recorded but calendar invite failed:', res);
+      confirmSub.textContent = "You're on the list. We'll follow up with the calendar invite shortly \u2014 everything you need to join is below.";
+    }
+
     document.getElementById('confirmName').textContent = 'See you there, ' + record.name.split(' ')[0];
-
     formState.classList.add('hidden');
     confirmState.classList.add('active');
+  }).catch(function(err){
+    console.error('RSVP failed:', err);
+    submitError.classList.add('show');
+  }).finally(function(){
     submitBtn.disabled = false;
     submitBtn.textContent = 'Confirm RSVP';
   });
